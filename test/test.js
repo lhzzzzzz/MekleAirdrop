@@ -5,6 +5,7 @@ import { network } from "hardhat";
 import { MerkleTree } from 'merkletreejs'
 import keccak256 from "keccak256";
 
+
 describe("MyToken", function () {
     let token, owner, alice, bob, ethers;  // ← 声明在外层
 
@@ -65,9 +66,6 @@ describe("MyToken", function () {
             .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
     });
 
-    it("", async () => {
-
-    });
 });
 
 
@@ -80,12 +78,13 @@ describe("MerkleAirdrop", function () {
     let proofs;
     let ethers;
     let airdrop;
+    let stranger;
 
     beforeEach(async () => {
 
         const connection = await network.create();
         ethers = connection.ethers;
-        [owner, alice, bob, carol] = await ethers.getSigners();
+        [owner, alice, bob, carol, stranger] = await ethers.getSigners();
         const INITIAL_SUPPLY = ethers.parseEther("1000000");
         const MyToken = await ethers.getContractFactory("MyToken");
         token = await MyToken.deploy("MyToken", "MTK", owner.address);
@@ -216,10 +215,76 @@ describe("MerkleAirdrop", function () {
             await expect(airdrop.connect(alice).unpause()
             ).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
         });
+
     });
 
     // ========== setMerkleRoot ==========
     describe("setMerkleRoot", function () {
+        const makeLeaf = (address, amount) =>
+            ethers.keccak256(
+                ethers.concat([
+                    ethers.keccak256(
+                        ethers.AbiCoder.defaultAbiCoder().encode(
+                            ["address", "uint256"],
+                            [address, amount]
+                        )
+                    ),
+                ])
+            );
+        it("owner can set merkle root", async () => {
+            const amounts = {
+                [stranger.address]: ethers.parseEther("100"),
+                [alice.address]: ethers.parseEther("100"),
+                [bob.address]: ethers.parseEther("200"),
+                [carol.address]: ethers.parseEther("300"),
+            };
+            const leaves = Object.entries(amounts).map(([addr, amt]) => makeLeaf(addr, amt));
+            const newTree = new MerkleTree(leaves, keccak256, { sortPairs: true });
+            await expect(airdrop.setMerkleRoot(newTree.getHexRoot()))
+                .to.emit(airdrop, "MerkleRootUpdate");
 
+            await token.mint(owner.address, ethers.parseEther("100"));
+            await token.transfer(airdrop.getAddress(), ethers.parseEther("100"));
+            const strangerLeaf = makeLeaf(stranger.address, ethers.parseEther("100"));
+            const proof = newTree.getHexProof(strangerLeaf);
+            await airdrop.connect(stranger).claim(ethers.parseEther("100"), proof);
+            expect(await token.balanceOf(stranger.address)).equal(ethers.parseEther("100"));
+        })
+
+        it("non-owner can not set merkle root", async () => {
+            const amounts = {
+                [stranger.address]: ethers.parseEther("100"),
+                [alice.address]: ethers.parseEther("100"),
+                [bob.address]: ethers.parseEther("200"),
+                [carol.address]: ethers.parseEther("300"),
+            };
+            const leaves = Object.entries(amounts).map(([addr, amt]) => makeLeaf(addr, amt));
+            const newTree = new MerkleTree(leaves, keccak256, { sortPairs: true });
+            await expect(airdrop.connect(alice).setMerkleRoot(newTree.getHexRoot())).to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount");
+        });
+
+    });
+
+    describe("withdraw", function () {
+        it("owner can withdraw", async () => {
+            const aliceAmount = await token.balanceOf(alice.address);
+            const bobAmount = await token.balanceOf(bob.address);
+            const carolAmount = await token.balanceOf(carol.address);
+
+            const before = await token.balanceOf(owner.address);
+
+            await airdrop.withdrawn(owner.address, aliceAmount + bobAmount);
+
+            const after = await token.balanceOf(owner.address);
+            expect(after).equal(before + bobAmount + aliceAmount);
+
+        });
+
+        it("non-owner can not withdraw", async () => {
+            const aliceAmount = await token.balanceOf(alice.address);
+            const bobAmount = await token.balanceOf(bob.address);
+            const carolAmount = await token.balanceOf(carol.address);
+            await expect(airdrop.connect(alice).withdrawn(alice.address, aliceAmount + bobAmount + carolAmount)).to.be.revertedWithCustomError(airdrop, "OwnableUnauthorizedAccount");
+        });
     });
 });
